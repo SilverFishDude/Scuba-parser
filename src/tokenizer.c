@@ -308,14 +308,16 @@ static void tokenizer_add_parse_error(
   }
 }
 
-static bool is_alpha(int c) {
+// Inlined for performance: called on every character in the hot lexing path.
+static inline bool is_alpha(int c) {
   // We don't use ISO C isupper/islower functions here because they
   // depend upon the program's locale, while the behavior of the HTML5 spec is
   // independent of which locale the program is run in.
   return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
 }
 
-static int ensure_lowercase(int c) {
+// Inlined for performance: called on every character in the hot lexing path.
+static inline int ensure_lowercase(int c) {
   return c >= 'A' && c <= 'Z' ? c + 0x20 : c;
 }
 
@@ -787,15 +789,20 @@ static bool finish_attribute_name(GumboParser* parser) {
   assert(tag_state->_attributes.capacity);
 
   GumboVector* /* GumboAttribute* */ attributes = &tag_state->_attributes;
-  for (unsigned int i = 0; i < attributes->length; ++i) {
-    GumboAttribute* attr = attributes->data[i];
-    if (strlen(attr->name) == tag_state->_buffer.length &&
-        memcmp(attr->name, tag_state->_buffer.data,
-            tag_state->_buffer.length) == 0) {
-      // Identical attribute; bail.
-      add_duplicate_attr_error(parser, attr->name, i, attributes->length);
-      tag_state->_drop_next_attr_value = true;
-      return false;
+  // Only scan for duplicates if there are existing attributes; the vast
+  // majority of elements have none or one attribute, so this avoids the
+  // loop overhead entirely on the first attribute of each tag.
+  if (attributes->length > 0) {
+    for (unsigned int i = 0; i < attributes->length; ++i) {
+      GumboAttribute* attr = attributes->data[i];
+      if (strlen(attr->name) == tag_state->_buffer.length &&
+          memcmp(attr->name, tag_state->_buffer.data,
+              tag_state->_buffer.length) == 0) {
+        // Identical attribute; bail.
+        add_duplicate_attr_error(parser, attr->name, i, attributes->length);
+        tag_state->_drop_next_attr_value = true;
+        return false;
+      }
     }
   }
 
@@ -1964,6 +1971,8 @@ static StateResult handle_self_closing_start_tag_state(GumboParser* parser,
 // http://www.whatwg.org/specs/web-apps/current-work/complete.html#bogus-comment-state
 static StateResult handle_bogus_comment_state(GumboParser* parser,
     GumboTokenizerState* tokenizer, int c, GumboToken* output) {
+  // Consume all characters up to '>' or EOF in a tight loop, bypassing the
+  // per-character state machine dispatch overhead for this simple scan state.
   while (c != '>' && c != -1) {
     if (c == '\0') {
       c = 0xFFFD;
@@ -2850,7 +2859,9 @@ bool gumbo_lex(GumboParser* parser, GumboToken* output) {
     StateResult result =
         dispatch_table[tokenizer->_state](parser, tokenizer, c, output);
     // We need to clear reconsume_current_input before returning to prevent
-    // certain infinite loop states.
+    // certain infinite loop states.  Read the flag once and reset it
+    // immediately so we never read a stale value after the utf8iterator_next
+    // call below.
     bool should_advance = !tokenizer->_reconsume_current_input;
     tokenizer->_reconsume_current_input = false;
 
