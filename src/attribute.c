@@ -13,29 +13,24 @@
 // limitations under the License.
 //
 // Author: jdtang@google.com (Jonathan Tang)
-
 #include "attribute.h"
-
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-
 #include "util.h"
-
 struct GumboInternalParser;
-
 GumboAttribute* gumbo_get_attribute(
     const GumboVector* attributes, const char* name) {
-  for (unsigned int i = 0; i < attributes->length; ++i) {
-    GumboAttribute* attr = attributes->data[i];
-    if (!strcasecmp(attr->name, name)) {
-      return attr;
+  const unsigned int len = attributes->length;
+  GumboAttribute** data = (GumboAttribute**) attributes->data;
+  for (unsigned int i = 0; i < len; ++i) {
+    if (!strcasecmp(data[i]->name, name)) {
+      return data[i];
     }
   }
   return NULL;
 }
-
 void gumbo_destroy_attribute(
     struct GumboInternalParser* parser, GumboAttribute* attribute) {
   gumbo_parser_deallocate(parser, (void*) attribute->name);
