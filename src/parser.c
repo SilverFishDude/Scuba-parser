@@ -517,7 +517,8 @@ static bool is_fragment_parser(const GumboParser* parser) {
 
 // Returns the node at the bottom of the stack of open elements, or NULL if no
 // elements have been added yet.
-static GumboNode* get_current_node(GumboParser* parser) {
+// Inlined for performance: this is called on nearly every token processed.
+static inline GumboNode* get_current_node(GumboParser* parser) {
   GumboVector* open_elements = &parser->_parser_state->_open_elements;
   if (open_elements->length == 0) {
     assert(!parser->_output->root);
@@ -543,10 +544,21 @@ static GumboNode* get_adjusted_current_node(GumboParser* parser) {
 // case-insensitive match.
 static bool is_in_static_list(
     const char* needle, const GumboStringPiece* haystack, bool exact_match) {
+  // Cache the needle length once to avoid repeated strlen calls in the loop.
+  size_t needle_len = strlen(needle);
   for (unsigned int i = 0; haystack[i].length > 0; ++i) {
-    if ((exact_match && !strcmp(needle, haystack[i].data)) ||
-        (!exact_match && !strcasecmp(needle, haystack[i].data))) {
-      return true;
+    if (exact_match) {
+      // For exact matches, lengths must agree before we bother comparing bytes.
+      if (needle_len == haystack[i].length &&
+          !strcasecmp(needle, haystack[i].data)) {
+        return true;
+      }
+    } else {
+      // For prefix matches the haystack entry must be no longer than needle.
+      if (needle_len >= haystack[i].length &&
+          !strncasecmp(needle, haystack[i].data, haystack[i].length)) {
+        return true;
+      }
     }
   }
   return false;
@@ -678,7 +690,8 @@ static GumboError* parser_add_parse_error(
 // by is_start) with one of the tag types in the varargs list.  Terminate the
 // list with GUMBO_TAG_LAST; this functions as a sentinel since no portion of
 // the spec references tags that are not in the spec.
-static bool tag_in(
+// Inlined for performance: called on every token dispatch in every handler.
+static inline bool tag_in(
     const GumboToken* token, bool is_start, const gumbo_tagset tags) {
   GumboTag token_tag;
   if (is_start && token->type == GUMBO_TOKEN_START_TAG) {
@@ -692,7 +705,8 @@ static bool tag_in(
 }
 
 // Like tag_in, but for the single-tag case.
-static bool tag_is(const GumboToken* token, bool is_start, GumboTag tag) {
+// Inlined for performance: called on every token dispatch in every handler.
+static inline bool tag_is(const GumboToken* token, bool is_start, GumboTag tag) {
   if (is_start && token->type == GUMBO_TOKEN_START_TAG) {
     return token->v.start_tag.tag == tag;
   } else if (!is_start && token->type == GUMBO_TOKEN_END_TAG) {
@@ -703,7 +717,8 @@ static bool tag_is(const GumboToken* token, bool is_start, GumboTag tag) {
 }
 
 // Like tag_in, but checks for the tag of a node, rather than a token.
-static bool node_tag_in_set(const GumboNode* node, const gumbo_tagset tags) {
+// Inlined for performance: used extensively in scope checks and stack walks.
+static inline bool node_tag_in_set(const GumboNode* node, const gumbo_tagset tags) {
   assert(node != NULL);
   if (node->type != GUMBO_NODE_ELEMENT && node->type != GUMBO_NODE_TEMPLATE) {
     return false;
@@ -713,7 +728,8 @@ static bool node_tag_in_set(const GumboNode* node, const gumbo_tagset tags) {
 }
 
 // Like node_tag_in, but for the single-tag case.
-static bool node_qualified_tag_is(
+// Inlined for performance: used in nearly every token handler.
+static inline bool node_qualified_tag_is(
     const GumboNode* node, GumboNamespaceEnum ns, GumboTag tag) {
   assert(node);
   return (node->type == GUMBO_NODE_ELEMENT ||
@@ -722,7 +738,8 @@ static bool node_qualified_tag_is(
 }
 
 // Like node_tag_in, but for the single-tag case in the HTML namespace
-static bool node_html_tag_is(const GumboNode* node, GumboTag tag) {
+// Inlined for performance: the most frequently called node predicate.
+static inline bool node_html_tag_is(const GumboNode* node, GumboTag tag) {
   return node_qualified_tag_is(node, GUMBO_NAMESPACE_HTML, tag);
 }
 
@@ -1370,9 +1387,12 @@ static bool has_an_element_in_specific_scope(GumboParser* parser,
 
     GumboTag node_tag = node->v.element.tag;
     GumboNamespaceEnum node_ns = node->v.element.tag_namespace;
-    for (int j = 0; j < expected_size; ++j) {
-      if (node_tag == expected[j] && node_ns == GUMBO_NAMESPACE_HTML)
-        return true;
+    // Check for target tag match first; this is the success path and is
+    // checked more often than the scope-boundary tags in typical HTML.
+    if (node_ns == GUMBO_NAMESPACE_HTML) {
+      for (int j = 0; j < expected_size; ++j) {
+        if (node_tag == expected[j]) return true;
+      }
     }
 
     bool found = TAGSET_INCLUDES(tags, node_ns, node_tag);
