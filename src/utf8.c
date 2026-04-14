@@ -134,8 +134,37 @@ static void read_char(Utf8Iterator* iter) {
 
   uint32_t code_point = 0;
   uint32_t state = UTF8_ACCEPT;
-  for (const char* c = iter->_start; c < iter->_end; ++c) {
-    decode(&state, &code_point, (uint32_t)(unsigned char) (*c));
+  const char* const end = iter->_end;
+  const char* c = iter->_start;
+  const uint8_t first_byte = (uint8_t)*c;
+
+  // Fast path: ASCII bytes (0x00-0x7F) are single-byte characters and
+  // are the most common case in HTML documents.
+  if (first_byte < 0x80) {
+    iter->_width = 1;
+    if (first_byte == '\r') {
+      const char* next = c + 1;
+      if (next < end && *next == '\n') {
+        // Advance the iter, as if the carriage return didn't exist.
+        ++iter->_start;
+        // Preserve the true offset, since other tools that look at it may be
+        // unaware of HTML5's rules for converting \r into \n.
+        ++iter->_pos.offset;
+      }
+      iter->_current = '\n';
+      return;
+    }
+    if (__builtin_expect(utf8_is_invalid_code_point(first_byte), 0)) {
+      add_error(iter, GUMBO_ERR_UTF8_INVALID);
+      iter->_current = kUtf8ReplacementChar;
+    } else {
+      iter->_current = first_byte;
+    }
+    return;
+  }
+
+  for (; c < end; ++c) {
+    decode(&state, &code_point, (uint32_t)(uint8_t)*c);
     if (state == UTF8_ACCEPT) {
       iter->_width = c - iter->_start + 1;
       // This is the special handling for carriage returns that is mandated by
@@ -143,25 +172,13 @@ static void read_char(Utf8Iterator* iter) {
       // characters, we operate in terms of chars and only need a check for iter
       // overrun, instead of having to read in a full next code point.
       // http://www.whatwg.org/specs/web-apps/current-work/multipage/parsing.html#preprocessing-the-input-stream
-      if (code_point == '\r') {
-        assert(iter->_width == 1);
-        const char* next = c + 1;
-        if (next < iter->_end && *next == '\n') {
-          // Advance the iter, as if the carriage return didn't exist.
-          ++iter->_start;
-          // Preserve the true offset, since other tools that look at it may be
-          // unaware of HTML5's rules for converting \r into \n.
-          ++iter->_pos.offset;
-        }
-        code_point = '\n';
-      }
-      if (utf8_is_invalid_code_point(code_point)) {
+      if (__builtin_expect(utf8_is_invalid_code_point(code_point), 0)) {
         add_error(iter, GUMBO_ERR_UTF8_INVALID);
         code_point = kUtf8ReplacementChar;
       }
       iter->_current = code_point;
       return;
-    } else if (state == UTF8_REJECT) {
+    } else if (__builtin_expect(state == UTF8_REJECT, 0)) {
       // We don't want to consume the invalid continuation byte of a multi-byte
       // run, but we do want to skip past an invalid first byte.
       iter->_width = c - iter->_start + (c == iter->_start);
@@ -176,7 +193,7 @@ static void read_char(Utf8Iterator* iter) {
   // enter this method, it will detect that there's no input to consume and
   // output an EOF.
   iter->_current = kUtf8ReplacementChar;
-  iter->_width = iter->_end - iter->_start;
+  iter->_width = end - iter->_start;
   add_error(iter, GUMBO_ERR_UTF8_TRUNCATED);
 }
 
